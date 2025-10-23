@@ -168,7 +168,7 @@ function textPriceFallback($) {
   return m ? m[0] : "";
 }
 
-export const config = { runtime: "edge" };
+export const config = { runtime: "nodejs" };
 
 export default async function handler() {
   const results = [];
