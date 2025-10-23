@@ -85,33 +85,39 @@ const PRODUCTS = [
     name: "Sol de Janeiro — Cheirosa 59 Mist — MECCA NZ",
     url: "https://www.mecca.com/en-nz/sol-de-janeiro/cheirosa-59-perfume-mist-V-064668/",
     parse: ($) => {
-      const now = $(".product-sale-price, .product-price, [data-test='product-price']").first().text();
-      const was = $(".product-was-price, .strike-through").first().text();
+      // MECCA sometimes wraps a big CSS string before the price; grab money tokens from the visible chunk
+      const candidate = $(".product-sale-price, .product-price, [data-test='product-price']").first().text() || $("body").text();
+      const now = extractMoney(candidate);
+      const was = extractMoney($(".product-was-price, .strike-through").first().text());
       const saleBadge = $(".badge--sale, .badge.sale").text();
-      return normalizePriceResult({ now, was, saleBadge });
-    },
+      return normalizePriceResult({ now, was, saleBadge }, $);
+    },    
   },
   {
     key: "sundays_in_rio_mecca_nz",
     name: "Sol de Janeiro — Sundays in Rio Mist — MECCA NZ",
     url: "https://www.mecca.com/en-nz/sol-de-janeiro/sundays-in-rio-perfume-mist-I-077578/",
     parse: ($) => {
-      const now = $(".product-sale-price, .product-price, [data-test='product-price']").first().text();
-      const was = $(".product-was-price, .strike-through").first().text();
+      // MECCA sometimes wraps a big CSS string before the price; grab money tokens from the visible chunk
+      const candidate = $(".product-sale-price, .product-price, [data-test='product-price']").first().text() || $("body").text();
+      const now = extractMoney(candidate);
+      const was = extractMoney($(".product-was-price, .strike-through").first().text());
       const saleBadge = $(".badge--sale, .badge.sale").text();
-      return normalizePriceResult({ now, was, saleBadge });
+      return normalizePriceResult({ now, was, saleBadge }, $);
     },
+    
   },
   {
     key: "country_road_purse",
     name: "Country Road — Branded Credit Card Purse (Cocoa)",
     url: "https://www.countryroad.co.nz/branded-credit-card-purse-60285204-238",
     parse: ($) => {
-      const now = $(".product-price, .price, [itemprop='price']").first().text();
+      const now = $(".product-price [itemprop='price'], .product-price, .price").first().text();
       const was = $(".product-price--was, .strike-through, .was-price").first().text();
       const saleBadge = $(".badge--sale, .sale-flag").text();
-      return normalizePriceResult({ now, was, saleBadge });
+      return normalizePriceResult({ now, was, saleBadge }, $);
     },
+    
   },
   {
     key: "lululemon_ebb_to_street_bc",
@@ -131,28 +137,66 @@ const PRODUCTS = [
     parse: ($) => {
       const now = $(".product-sale-price, .product-price, [data-test='price']").first().text();
       const was = $(".product-was-price, .strike-through, .was-price").first().text();
-      const saleBadge = $(".badge--sale, .sale-badge").text();
-      return normalizePriceResult({ now, was, saleBadge });
+      let promo = $(".promotions, .promotion, [data-test='promotion']").first().text().trim();
+      if (!promo) {
+        // try scanning for “BUY ONE” style copy
+        const body = $("body").text();
+        const m = body.match(/BUY\s+ONE.*?(\d+%|HALF|50%)/i);
+        promo = m ? m[0] : "";
+      }
+      const base = normalizePriceResult({ now, was, saleBadge: $(".badge--sale, .sale-badge").text() }, $);
+      // attach promo string for UI (optional: add to results payload)
+      base.promo = promo;
+      return base;
     },
+    
   },
 ];
+function extractMoney(text) {
+  // returns the first $.. or NZ$.. or A$.. pattern; if multiple, returns joined unique
+  const matches = Array.from((text || "").matchAll(/(?:NZ\$|A\$|\$)\s?\d[\d,]*(?:\.\d{1,2})?/g)).map(m => m[0]);
+  const uniq = [...new Set(matches)];
+  if (uniq.length === 0) return "";
+  if (uniq.length === 1) return uniq[0];
+  // If it's a range like "$49.00 - $74.00", keep it as-is
+  return uniq.join(" - ");
+}
 
-function normalizePriceResult({ now, was, saleBadge }) {
-  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-  const priceToNumber = (s) => {
-    if (!s) return null;
-    const m = s.replace(/[, ]/g, "").match(/(\d+(\.\d{1,2})?)/);
+function ensureCurrency(s, currency = "NZ$") {
+  if (!s) return "";
+  if (/^\s*(NZ\$|A\$|\$)/.test(s)) return s.trim();
+  // Country Road sometimes gives "44.90" → prefix
+  if (/^\s*\d/.test(s)) return `${currency}${s.trim()}`;
+  return s.trim();
+}
+function normalizePriceResult({ now, was, saleBadge }, $) {
+  const norm = (x) => (x || "").replace(/\s+/g, " ").trim();
+  let nowTxt = norm(now);
+  let wasTxt = norm(was);
+
+  if (!nowTxt) {
+    // last resort: scan page text for a money pattern
+    nowTxt = extractMoney(($ && $.text && typeof $.text === "function") ? $("body").text() : "");
+  }
+
+  // normalise Country Road style numeric-only prices
+  nowTxt = ensureCurrency(nowTxt);
+  wasTxt = ensureCurrency(wasTxt);
+
+  const toNum = (s) => {
+    const m = (s || "").replace(/[, ]/g, "").match(/(\d+(\.\d{1,2})?)/);
     return m ? Number(m[1]) : null;
   };
-  const nowTxt = norm(now);
-  const wasTxt = norm(was);
-  const nowNum = priceToNumber(nowTxt);
-  const wasNum = priceToNumber(wasTxt);
+  const nowNum = toNum(nowTxt);
+  const wasNum = toNum(wasTxt);
+
   const onSaleMarkup =
     (!!saleBadge && saleBadge.toLowerCase().includes("sale")) ||
     (!!wasTxt && !!nowTxt && wasNum && nowNum && nowNum < wasNum);
+
   return { nowTxt, wasTxt, nowNum, wasNum, onSaleMarkup };
 }
+
 
 function textPriceFallback($) {
   const body = $("body").text();
@@ -160,7 +204,15 @@ function textPriceFallback($) {
   return m ? m[0] : "";
 }
 
-// --- Robust fetch with per-request timeout
+function randomUA() {
+  const uas = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  ];
+  return uas[Math.floor(Math.random() * uas.length)];
+}
+
 async function fetchWithTimeout(url, { timeoutMs = 9000 } = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
@@ -168,9 +220,12 @@ async function fetchWithTimeout(url, { timeoutMs = 9000 } = {}) {
     const res = await fetch(url, {
       signal: controller.signal,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": randomUA(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-NZ,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
       },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -187,39 +242,13 @@ export default async function handler(req, res) {
       const html = await fetchWithTimeout(p.url, { timeoutMs: 9000 });
       const $ = cheerio.load(html);
       const parsed = p.parse($);
-
-      let dropDetected = false;
-      if (parsed.nowNum != null) {
-        const prevRaw = await kvGet(`price:${p.key}`);
-        const prevNum = prevRaw ? Number(prevRaw) : null;
-        if (prevNum != null && parsed.nowNum < prevNum) dropDetected = true;
-        await kvSet(`price:${p.key}`, String(parsed.nowNum));
-      }
-
-      return {
-        key: p.key,
-        name: p.name,
-        url: p.url,
-        now: parsed.nowTxt || "(price not found)",
-        was: parsed.wasTxt || "",
-        onSaleMarkup: parsed.onSaleMarkup,
-        dropDetected,
-      };
-    } catch (e) {
-      return {
-        key: p.key,
-        name: p.name,
-        url: p.url,
-        error: e?.message || String(e),
-      };
-    }
-  });
-
-  const settled = await Promise.allSettled(tasks);
-  const results = settled.map((r) => (r.status === "fulfilled" ? r.value : { error: r.reason?.message || String(r.reason) }));
-
-  const payload = { ranAt: new Date().toISOString(), results };
-  // Node handler must end with res.send/json
-  res.setHeader("content-type", "application/json");
-  res.status(200).send(JSON.stringify(payload, null, 2));
-}
+results.push({
+  key: p.key,
+  name: p.name,
+  url: p.url,
+  now: parsed.nowTxt || "(price not found)",
+  was: parsed.wasTxt || "",
+  onSaleMarkup: parsed.onSaleMarkup,
+  dropDetected,
+  promo: parsed.promo || "",
+});
