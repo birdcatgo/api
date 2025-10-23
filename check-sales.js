@@ -1,7 +1,10 @@
-import axios from "axios";
+// api/check-sales.js
 import * as cheerio from "cheerio";
 
-// OPTIONAL: Upstash Redis to remember last price (for drop arrows)
+// --- Force Node runtime for best library compatibility
+export const config = { runtime: "nodejs" };
+
+// OPTIONAL: Upstash for price-drop memory
 const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -20,6 +23,7 @@ async function kvSet(key, val) {
   });
 }
 
+// --- PRODUCTS (same as before)
 const PRODUCTS = [
   {
     key: "peteralexander_winnie_pj",
@@ -150,31 +154,37 @@ function normalizePriceResult({ now, was, saleBadge }) {
   return { nowTxt, wasTxt, nowNum, wasNum, onSaleMarkup };
 }
 
-async function fetchHtml(url) {
-  const { data } = await axios.get(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml",
-    },
-    timeout: 20000,
-  });
-  return data;
-}
-
 function textPriceFallback($) {
   const body = $("body").text();
   const m = body.match(/(\$|NZ\$|A\$|€|£)\s?\d[\d,]*(\.\d{1,2})?/);
   return m ? m[0] : "";
 }
 
-export const config = { runtime: "nodejs" };
+// --- Robust fetch with per-request timeout
+async function fetchWithTimeout(url, { timeoutMs = 9000 } = {}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+      },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(t);
+  }
+}
 
-export default async function handler() {
-  const results = [];
-  for (const p of PRODUCTS) {
+export default async function handler(req, res) {
+  // Run all fetches concurrently; none can stall the whole function
+  const tasks = PRODUCTS.map(async (p) => {
     try {
-      const html = await fetchHtml(p.url);
+      const html = await fetchWithTimeout(p.url, { timeoutMs: 9000 });
       const $ = cheerio.load(html);
       const parsed = p.parse($);
 
@@ -186,7 +196,7 @@ export default async function handler() {
         await kvSet(`price:${p.key}`, String(parsed.nowNum));
       }
 
-      results.push({
+      return {
         key: p.key,
         name: p.name,
         url: p.url,
@@ -194,19 +204,22 @@ export default async function handler() {
         was: parsed.wasTxt || "",
         onSaleMarkup: parsed.onSaleMarkup,
         dropDetected,
-      });
+      };
     } catch (e) {
-      results.push({
+      return {
         key: p.key,
         name: p.name,
         url: p.url,
-        error: e.message || String(e),
-      });
+        error: e?.message || String(e),
+      };
     }
-  }
-
-  return new Response(JSON.stringify({ ranAt: new Date().toISOString(), results }, null, 2), {
-    headers: { "content-type": "application/json" },
-    status: 200,
   });
+
+  const settled = await Promise.allSettled(tasks);
+  const results = settled.map((r) => (r.status === "fulfilled" ? r.value : { error: r.reason?.message || String(r.reason) }));
+
+  const payload = { ranAt: new Date().toISOString(), results };
+  // Node handler must end with res.send/json
+  res.setHeader("content-type", "application/json");
+  res.status(200).send(JSON.stringify(payload, null, 2));
 }
